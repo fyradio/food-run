@@ -108,7 +108,7 @@ button:focus-visible{outline:3px solid var(--steam);outline-offset:2px}
 
 <div id="stage">
   <canvas id="cv" role="img" aria-label="遊戲畫面"></canvas>
-  <div class="ver">v0.2.2</div>
+  <div class="ver">v0.3.0</div>
 
   <section id="menu" class="screen menu">
     <header class="brand">
@@ -386,6 +386,21 @@ const opLabel = op => op.op === 'add' ? '+' + fmt(op.v) : op.op === 'mul' ? '×'
 const opGood = op => op.op === 'add' || op.op === 'mul';
 
 // 依裝置人數上限 lim 產生關卡：閘門數值與魔王血量都按上限縮放。
+// 障礙／獎勵依關卡逐步登場：1 夥伴、2 辣椒鍋、3 菜刀、4 柵欄、5 三連閘門。
+function genObstacle(n, rng, z, c) {
+  if (rng() > Math.min(0.4 + 0.05 * n, 0.9)) return null;
+  const pool = [['pick', 3]];
+  if (n >= 2) pool.push(['pot', 3]);
+  if (n >= 3) pool.push(['blade', 2.5]);
+  if (n >= 4) pool.push(['fence', 2.5]);
+  let tot = 0; for (const p of pool) tot += p[1];
+  let r = rng() * tot, kind = pool[0][0];
+  for (const p of pool) { r -= p[1]; if (r < 0) { kind = p[0]; break; } }
+  const x = [-0.5, 0, 0.5][Math.floor(rng() * 3)];
+  if (kind === 'pick') return { kind, z, x: [-0.6, -0.3, 0.3, 0.6][Math.floor(rng() * 4)], v: Math.max(3, niceInt(c * 0.12)), used: false };
+  if (kind === 'blade') return { kind, z, amp: 0.62, w: 2.2 + rng() * 1.6, ph: rng() * 6.28, used: false };
+  return { kind, z, x, used: false };      // pot；fence 的 x 是缺口中心
+}
 function genLevel(n, lim) {
   const rng = mulberry32(n * 7919 + 101);
   const rows = Math.min(9 + n, 22);                 // 第 1 關 10 道閘門，之後每關多 1 道，最多 22 道
@@ -404,14 +419,23 @@ function genLevel(n, lim) {
     if (k < 0.4) bad = { op: 'sub', v: Math.max(1, niceInt(c * (0.25 + rng() * 0.25))) };
     else if (k < 0.65) bad = { op: 'div', v: 2 };
     else bad = { op: 'add', v: Math.max(1, niceInt(c * (g - 1) * 0.3)) };
-    const goodLeft = rng() < 0.5;
-    const gate = { z, L: goodLeft ? good : bad, R: goodLeft ? bad : good, used: false, picked: null };
+    let gate;
+    if (n >= 5 && r > 0 && r < rows - 1 && rng() < 0.35) {          // 三連閘門：左、中、右三選一
+      const mid = { op: 'add', v: Math.max(1, niceInt(c * (g - 1) * 0.4)) };
+      const worst = rng() < 0.5 ? { op: 'sub', v: Math.max(1, niceInt(c * (0.3 + rng() * 0.25))) } : { op: 'div', v: 2 };
+      const ops = [good, mid, worst];
+      for (let i = 2; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); const t = ops[i]; ops[i] = ops[j]; ops[j] = t; }
+      gate = { z, ops, bounds: [-1, -1 / 3, 1 / 3, 1], used: false, picked: -1 };
+      opt = Math.max(applyOp(ops[0], opt, lim), applyOp(ops[1], opt, lim), applyOp(ops[2], opt, lim));
+    } else {
+      const goodLeft = rng() < 0.5;
+      const L = goodLeft ? good : bad, R = goodLeft ? bad : good;
+      gate = { z, ops: [L, R], bounds: [-1, 0, 1], used: false, picked: -1 };
+      opt = Math.max(applyOp(L, opt, lim), applyOp(R, opt, lim));
+    }
     gates.push(gate);
     c = applyOp(good, c, lim);
-    opt = Math.max(applyOp(gate.L, opt, lim), applyOp(gate.R, opt, lim));
-    if (n >= 2 && r < rows - 1 && rng() < Math.min(0.3 + 0.05 * n, 0.85)) {
-      traps.push({ z: z + 6, x: [-0.5, 0, 0.5][Math.floor(rng() * 3)], used: false });
-    }
+    if (r < rows - 1) { const o = genObstacle(n, rng, z + 6, c); if (o) traps.push(o); }
     z += 12;
   }
   const bossZ = z + 12;
@@ -451,7 +475,7 @@ function startLevel(n) {
 function startTest() {
   resetWorld();
   const gates = [];
-  for (let i = 0; i < 19; i++) gates.push({ z: 10 + i * 8, L: { op: 'mul', v: 2 }, R: { op: 'mul', v: 2 }, used: false, picked: null });
+  for (let i = 0; i < 19; i++) gates.push({ z: 10 + i * 8, ops: [{ op: 'mul', v: 2 }, { op: 'mul', v: 2 }], bounds: [-1, 0, 1], used: false, picked: -1 });
   Object.assign(G, { gates, count: 1, speed: 8, limit: MAXN, foodIdx: 0 });
   T = { stage: 0, rec: [], t0: performance.now(), settled: false, frames: 0, sum: 0, worst: 0, done: false };
   mode = 'test'; fpsEma = 60;
@@ -490,46 +514,69 @@ function applyPart(op, n, lim) {
   if (op.op === 'add') r = n + op.v; else if (op.op === 'mul') r = n * op.v; else if (op.op === 'sub') r = n - op.v; else r = Math.floor(n / op.v);
   return clamp(Math.round(r), 0, lim);
 }
+function applyPart(op, n, lim) {
+  if (n <= 0) return 0;
+  let r = n;
+  if (op.op === 'add') r = n + op.v; else if (op.op === 'mul') r = n * op.v; else if (op.op === 'sub') r = n - op.v; else r = Math.floor(n / op.v);
+  return clamp(Math.round(r), 0, lim);
+}
+function overlapFrac(cx, hw, a, b) { return Math.max(0, Math.min(cx + hw, b) - Math.max(cx - hw, a)) / (2 * hw); }
+function bladeX(t) { return t.amp * Math.sin(G.t * t.w + t.ph); }
 function resolveGate(g) {
-  const side = G.leaderX < 0 ? 'L' : 'R';
-  g.used = true; g.picked = side;
+  const nz = g.ops.length;
+  g.used = true;
   const p = 1 / (1 + PK * (g.z - G.D));
   const gyy = horizonY + (groundY - horizonY) * p - laneHalf * p * 0.7;
   if (mode === 'test') {
-    const op = g[side];
+    const k = G.leaderX < 0 ? 0 : 1; g.picked = k;
     finalizeStage();
     if (T.done) return;
-    G.count = applyOp(op, G.count, MAXN); T.stage++;
+    G.count = applyOp(g.ops[k], G.count, MAXN); T.stage++;
     T.t0 = performance.now(); T.settled = false; T.frames = 0; T.sum = 0; T.worst = 0;
     sfx.tick(T.stage); G.flash = 0.18; G.flashCol = COL.blue;
     popCount($('tCount')); $('tCount').textContent = fmt(G.count);
     return;
   }
-  // 隊伍滿出半邊時，落在哪一邊的食物就吃哪一邊的閘門
+  // 隊伍落在哪一區，那一區的食物就吃那一區的閘門（滿出去的部分也一樣）
   const { cx, hw } = crowdBox();
   const before = Math.max(1, G.count | 0);
-  const fL = clamp((hw - cx) / (2 * hw), 0, 1);
-  const nL = Math.round(before * fL), nR = before - nL;
-  const aL = applyPart(g.L, nL, G.limit), aR = applyPart(g.R, nR, G.limit);
-  G.count = clamp(aL + aR, 1, G.limit);
-  g.picked = nL >= nR ? 'L' : 'R';
-  if (nL > 0) floater(W / 2 - 0.5 * laneHalf * p, gyy, opLabel(g.L), opGood(g.L) ? COL.blue : COL.bad, nR > 0 ? 26 : 34);
-  if (nR > 0) floater(W / 2 + 0.5 * laneHalf * p, gyy, opLabel(g.R), opGood(g.R) ? COL.blue : COL.bad, nL > 0 ? 26 : 34);
+  const cum = e => clamp((e - (cx - hw)) / (2 * hw), 0, 1);
+  const ns = []; let total = 0, best = 0;
+  for (let k = 0; k < nz; k++) {
+    const n = Math.round(before * cum(g.bounds[k + 1])) - Math.round(before * cum(g.bounds[k]));
+    ns.push(n); total += applyPart(g.ops[k], n, G.limit); if (n > ns[best]) best = k;
+  }
+  G.count = clamp(total, 1, G.limit); g.picked = best;
+  const multi = ns.filter(n => n > 0).length > 1;
+  for (let k = 0; k < nz; k++) if (ns[k] > 0) {
+    const op = g.ops[k], xc = (g.bounds[k] + g.bounds[k + 1]) / 2;
+    floater(W / 2 + xc * laneHalf * p, gyy, opLabel(op), opGood(op) ? COL.blue : COL.bad, multi ? 26 : 34);
+  }
   const good = G.count >= before;
   if (good) sfx.good(); else sfx.bad();
   G.flash = 0.22; G.flashCol = good ? COL.blue : COL.bad;
   popCount($('hudCount'));
   sixCheck(before, G.count);
 }
-function resolveTrap(tr) {
-  tr.used = true;
+function resolveObstacle(t) {
+  t.used = true;
   const { cx, hw } = crowdBox();
-  const lo = Math.max(cx - hw, tr.x - 0.3), hi = Math.min(cx + hw, tr.x + 0.3);
-  const ov = Math.max(0, hi - lo); if (ov <= 0) return;
-  const loss = Math.min(G.count - 1, Math.ceil(G.count * (ov / (2 * hw)) * 0.4)); if (loss <= 0) return;
+  const p = 1 / (1 + PK * ZC), fy = horizonY + (groundY - horizonY) * p - laneHalf * 0.45;
+  if (t.kind === 'pick') {                                   // 夥伴：碰到就加入隊伍
+    if (Math.abs(t.x - cx) > hw + 0.2) return;
+    const before = G.count; G.count = Math.min(G.limit, G.count + t.v); t.got = true;
+    sfx.good(); G.flash = 0.18; G.flashCol = COL.tea; popCount($('hudCount'));
+    floater(W / 2 + t.x * laneHalf * p, fy, '+' + fmt(G.count - before), COL.tea, 30);
+    sixCheck(before, G.count); return;
+  }
+  let frac, k;
+  if (t.kind === 'fence') { frac = 1 - overlapFrac(cx, hw, t.x - 0.4, t.x + 0.4); k = 0.55; }   // 缺口以外的食物被擋住
+  else if (t.kind === 'blade') { const bx = bladeX(t); frac = overlapFrac(cx, hw, bx - 0.28, bx + 0.28); k = 0.5; }
+  else { frac = overlapFrac(cx, hw, t.x - 0.3, t.x + 0.3); k = 0.4; }
+  const loss = Math.min(G.count - 1, Math.ceil(G.count * frac * k)); if (loss <= 0) return;
   G.count -= loss; sfx.hit(); G.flash = 0.22; G.flashCol = COL.bad; popCount($('hudCount'));
-  const p = 1 / (1 + PK * ZC);
-  floater(W / 2 + cx * laneHalf * p, horizonY + (groundY - horizonY) * p - laneHalf * 0.45, '−' + fmt(loss), COL.bad, 30);
+  if (t.kind !== 'pot' && !REDUCE) G.shake = Math.max(G.shake, 0.25);
+  floater(W / 2 + cx * laneHalf * p, fy, '−' + fmt(loss), COL.bad, 30);
 }
 function startBoss() {
   const L = G.level;
@@ -698,7 +745,7 @@ function update(dt) {
     G.D += G.speed * dt;
     for (const g of G.gates) if (!g.used && g.z - G.D <= ZC) { resolveGate(g); if (mode !== 'test' && mode !== 'play') return; if (T && T.done) return; }
     if (mode === 'play') {
-      for (const t of G.traps) if (!t.used && t.z - G.D <= ZC) resolveTrap(t);
+      for (const t of G.traps) if (!t.used && t.z - G.D <= ZC) resolveObstacle(t);
       $('hudProg').style.width = (clamp(G.D / G.stopD, 0, 1) * 100).toFixed(1) + '%';
       if (G.D >= G.stopD) { G.D = G.stopD; startBoss(); }
     }
@@ -747,30 +794,34 @@ function drawBG() {
 function drawGate(g) {
   const rel = g.z - G.D; if (rel > FAR || rel < -1.4) return;
   const p = 1 / (1 + PK * rel), y0 = horizonY + (groundY - horizonY) * p, hh = 1.35 * laneHalf * p;
-  const used = g.used, pickSide = G.leaderX < 0 ? 'L' : 'R';
-  for (const side of ['L', 'R']) {
-    const op = g[side], good = opGood(op);
-    const x0 = W / 2 + (side === 'L' ? -1 : 0.02) * laneHalf * p, x1 = W / 2 + (side === 'L' ? -0.02 : 1) * laneHalf * p;
-    ctx.globalAlpha = used ? (g.picked === side ? 0.35 : 0.15) : 1;
+  const used = g.used, nz = g.ops.length, B = g.bounds;
+  for (let k = 0; k < nz; k++) {
+    const op = g.ops[k], good = opGood(op);
+    const x0 = W / 2 + (B[k] + (k > 0 ? 0.02 : 0)) * laneHalf * p, x1 = W / 2 + (B[k + 1] - (k < nz - 1 ? 0.02 : 0)) * laneHalf * p;
+    ctx.globalAlpha = used ? (g.picked === k ? 0.35 : 0.15) : 1;
     ctx.fillStyle = good ? 'rgba(70,168,255,.6)' : 'rgba(255,77,109,.6)'; ctx.fillRect(x0, y0 - hh, x1 - x0, hh);
     ctx.fillStyle = good ? '#9fd4ff' : '#ffb0bf'; ctx.fillRect(x0, y0 - hh, x1 - x0, Math.max(2, hh * 0.08));
-    const fs = clamp(hh * 0.46, 8, 90);
+    const fs = clamp(hh * (nz === 3 ? 0.36 : 0.46), 8, 90);
     ctx.font = '700 ' + fs + 'px Fredoka, Huninn, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.lineWidth = Math.max(2, fs * 0.16); ctx.strokeStyle = '#2b1d3a'; ctx.lineJoin = 'round';
     const lab = opLabel(op), tx = (x0 + x1) / 2, ty = y0 - hh * 0.5;
     ctx.strokeText(lab, tx, ty); ctx.fillStyle = COL.steam; ctx.fillText(lab, tx, ty);
-    if (!used && selGate === g && curBox && (side === 'L' ? curBox.cx - curBox.hw < 0 : curBox.cx + curBox.hw > 0)) {      // 目前手指指向的那一邊
+    if (!used && selGate === g && curBox && curBox.cx + curBox.hw > B[k] && curBox.cx - curBox.hw < B[k + 1]) {   // 隊伍碰到的那一區
       ctx.globalAlpha = 1; ctx.lineWidth = Math.max(2, hh * 0.035); ctx.strokeStyle = '#fff'; ctx.strokeRect(x0 + 1, y0 - hh + 1, x1 - x0 - 2, hh - 2);
     }
   }
   ctx.globalAlpha = used ? 0.3 : 1; ctx.fillStyle = '#fff3df';
-  ctx.fillRect(W / 2 - Math.max(1, 0.03 * laneHalf * p), y0 - hh, Math.max(2, 0.06 * laneHalf * p), hh);
+  for (let k = 1; k < nz; k++) ctx.fillRect(W / 2 + B[k] * laneHalf * p - Math.max(1, 0.03 * laneHalf * p), y0 - hh, Math.max(2, 0.06 * laneHalf * p), hh);
   ctx.globalAlpha = 1;
 }
-function drawTrap(t) {
+function drawObstacle(t) {
   const rel = t.z - G.D; if (rel > FAR || rel < -1.4) return;
+  ctx.globalAlpha = t.used ? (t.got ? 0.15 : 0.3) : 1;
+  if (t.kind === 'pot') drawPot(t, rel); else if (t.kind === 'blade') drawBlade(t, rel); else if (t.kind === 'fence') drawFence(t, rel); else drawPick(t, rel);
+  ctx.globalAlpha = 1;
+}
+function drawPot(t, rel) {
   const q = proj(t.x, rel), rx = 0.3 * laneHalf * q[2], ry = 0.13 * laneHalf * q[2];
-  ctx.globalAlpha = t.used ? 0.3 : 1;
   ctx.fillStyle = '#3a0f1a'; ctx.beginPath(); ctx.ellipse(q[0], q[1], rx, ry, 0, 0, 7); ctx.fill();
   ctx.fillStyle = COL.lantern; ctx.beginPath(); ctx.ellipse(q[0], q[1] - ry * 0.25, rx * 0.86, ry * 0.8, 0, 0, 7); ctx.fill();
   ctx.fillStyle = COL.noodle; ctx.beginPath(); ctx.ellipse(q[0], q[1] - ry * 0.3, rx * 0.5, ry * 0.45, 0, 0, 7); ctx.fill();
@@ -779,7 +830,49 @@ function drawTrap(t) {
     ctx.fillStyle = i === 0 ? COL.noodle : COL.lantern; ctx.beginPath();
     ctx.moveTo(q[0] + i * rx * 0.45 - rx * 0.16, q[1] - ry * 0.6); ctx.lineTo(q[0] + i * rx * 0.45, q[1] - ry * 0.6 - laneHalf * q[2] * 0.3 * fl * (i === 0 ? 1.2 : 0.9)); ctx.lineTo(q[0] + i * rx * 0.45 + rx * 0.16, q[1] - ry * 0.6); ctx.fill();
   }
-  ctx.globalAlpha = 1;
+}
+// 菜刀：在軌道上左右來回掃，抓時機通過
+function drawBlade(t, rel) {
+  const x = bladeX(t), q = proj(x, rel), p = q[2], a = proj(-1.05, rel), b = proj(1.05, rel);
+  ctx.strokeStyle = '#120a1c'; ctx.lineWidth = Math.max(2, 8 * p); ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+  ctx.strokeStyle = '#7a5a80'; ctx.lineWidth = Math.max(1, 3 * p); ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+  const bw = 0.56 * laneHalf * p, bh = 0.5 * laneHalf * p, swing = Math.cos(G.t * t.w + t.ph) * 0.35;
+  ctx.save(); ctx.translate(q[0], q[1] - 0.06 * laneHalf * p); ctx.rotate(swing);
+  ctx.fillStyle = '#7a2b2b'; ctx.fillRect(-bw * 0.12, -bh - bh * 0.45, bw * 0.24, bh * 0.5);
+  ctx.fillStyle = '#d7dff0'; ctx.fillRect(-bw / 2, -bh, bw, bh);
+  ctx.fillStyle = '#f4f7ff'; ctx.fillRect(-bw / 2, -bh, bw, bh * 0.14);
+  ctx.fillStyle = '#9aa7c4'; ctx.fillRect(-bw / 2, -bh * 0.1, bw, bh * 0.1);
+  ctx.fillStyle = '#2b1d3a'; ctx.beginPath(); ctx.arc(bw * 0.26, -bh * 0.62, bw * 0.06, 0, 7); ctx.fill();
+  ctx.restore();
+}
+// 柵欄：只有一個缺口能通過，缺口以外的食物會被擋住
+function drawFence(t, rel) {
+  const p = 1 / (1 + PK * rel), y0 = horizonY + (groundY - horizonY) * p, hh = 0.7 * laneHalf * p;
+  const gl = t.x - 0.4, gr = t.x + 0.4, X = v => W / 2 + v * laneHalf * p, rw = Math.max(2, hh * 0.1);
+  ctx.fillStyle = '#8a5a34';
+  for (const sg of [[-1, gl], [gr, 1]]) if (sg[1] - sg[0] > 0.02) { ctx.fillRect(X(sg[0]), y0 - hh * 0.78, X(sg[1]) - X(sg[0]), rw); ctx.fillRect(X(sg[0]), y0 - hh * 0.38, X(sg[1]) - X(sg[0]), rw); }
+  const pw = Math.max(2, 0.07 * laneHalf * p), xs = [gl, gr];
+  for (let i = 0; i <= 10; i++) { const v = -1 + i * 0.2; if (v < gl - 0.02 || v > gr + 0.02) xs.push(v); }
+  for (const v of xs) {
+    if (v < -1.001 || v > 1.001) continue;
+    ctx.fillStyle = '#b07a45'; ctx.fillRect(X(v) - pw / 2, y0 - hh, pw, hh);
+    ctx.fillStyle = '#d9a468'; ctx.fillRect(X(v) - pw / 2, y0 - hh, pw, Math.max(2, hh * 0.1));
+  }
+  const ax = X(t.x), ay = y0 - hh * 1.2, as = Math.max(4, 0.12 * laneHalf * p);       // 缺口上方的綠色箭頭
+  ctx.fillStyle = COL.tea; ctx.beginPath(); ctx.moveTo(ax - as, ay - as); ctx.lineTo(ax + as, ay - as); ctx.lineTo(ax, ay + as * 0.4); ctx.fill();
+}
+// 夥伴：一小群同伴，碰到就加入隊伍
+function drawPick(t, rel) {
+  const q = proj(t.x, rel), p = q[2], r = 0.2 * laneHalf * p, img = foodSprite(G.foodIdx);
+  ctx.fillStyle = 'rgba(111,220,164,.22)'; ctx.beginPath(); ctx.arc(q[0], q[1] - r * 0.7, r * 1.7, 0, 7); ctx.fill();
+  const offs = [[-1, 0], [1, 0], [0, -0.9], [-0.5, 0.9], [0.5, 0.9]], sz = r * 1.15;
+  for (let k = 0; k < offs.length; k++) {
+    const bob = Math.abs(Math.sin(G.t * 6 + k * 1.3)) * r * 0.45;
+    ctx.drawImage(img, q[0] + offs[k][0] * r * 0.75 - sz / 2, q[1] + offs[k][1] * r * 0.3 - sz - bob, sz, sz);
+  }
+  const fs = clamp(r * 1.4, 10, 44);
+  ctx.font = '700 ' + fs + 'px Fredoka, Huninn, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
+  ctx.lineWidth = fs * 0.16; ctx.strokeStyle = '#2b1d3a'; ctx.strokeText('+' + fmt(t.v), q[0], q[1] - r * 2.6); ctx.fillStyle = COL.tea; ctx.fillText('+' + fmt(t.v), q[0], q[1] - r * 2.6);
 }
 // 魔王 = 下一關的食物放大版，加上憤怒的臉
 function drawBoss() {
@@ -823,27 +916,25 @@ function drawCrowd() {
   const idxN = Math.min(N, F.total) - 1;
   let hw = Math.min(F.hwP[idxN], F.hwMax + 0.05), s = F.s;
   if (pv) { hw = pv.hw + (hw - pv.hw) * sp; s = pv.s + (s - pv.s) * sp; }
-  const zm = F.zmP[idxN], lim = Math.max(0, LANE_IN - hw), cxw = clamp(G.leaderX, -lim, lim);
+  const lim = Math.max(0, LANE_IN - hw), cxw = clamp(G.leaderX, -lim, lim);
   const dyH = groundY - horizonY, px0 = s * laneHalf, food = FOODS[G.foodIdx];
-  const pN = 1 / (1 + PK * ZC), pF = 1 / (1 + PK * (ZC + zm + s)), pM = (pN + pF) / 2;
-  const yN = horizonY + dyH * pN, yF = horizonY + dyH * pF;
-  ctx.fillStyle = 'rgba(0,0,0,.28)'; ctx.beginPath();
-  ctx.ellipse(W / 2 + cxw * laneHalf * pM, (yN + yF) / 2, (hw + 0.06) * laneHalf * pM, (yN - yF) / 2 + 4, 0, 0, 7); ctx.fill();
   const dl = F.dl, X = F.X, Z = F.Z, nd = dl.length, cw = W / 2;
-  const big = px0 * pN >= 6, img = big ? foodSprite(G.foodIdx) : null, hop = big && N <= 600, t9 = G.t * 9;
+  const big = px0 / (1 + PK * ZC) >= 6, img = big ? foodSprite(G.foodIdx) : null, t8 = G.t * 8.5, shade = big && N <= 1500;
   if (!big) ctx.fillStyle = food.col;
   for (let j = 0; j < nd; j++) {
     const i = dl[j]; if (i >= N) continue;
     let x = X[i], z = Z[i];
     if (pv) { x = pv.X[i] + (x - pv.X[i]) * sp; z = pv.Z[i] + (z - pv.Z[i]) * sp; }
-    const p = 1 / (1 + PK * (ZC + z)), px = px0 * p * 1.14, sx = cw + (cxw + x) * laneHalf * p - px * 0.5;
-    let y = horizonY + dyH * p;
+    const p = 1 / (1 + PK * (ZC + z)), px = px0 * p * 1.14, sx = cw + (cxw + x) * laneHalf * p, gy = horizonY + dyH * p;
     if (big) {
-      if (hop) y -= Math.abs(Math.sin(t9 + i * 0.9)) * 0.05 * laneHalf * p;
-      ctx.drawImage(img, sx, y - px, px, px);
+      // 立體彈跳：彈跳像波浪從後排往前排傳過來；落地壓扁、騰空拉長；地上有一個小接地影
+      const hv = Math.abs(Math.sin(t8 - z * 1.7 + (i % 11) * 0.35)), lift = hv * 0.16 * laneHalf * p;
+      if (shade) { ctx.fillStyle = 'rgba(20,8,30,.28)'; const sr = px * (0.34 - 0.1 * hv); ctx.fillRect(sx - sr, gy - sr * 0.28, sr * 2, sr * 0.5); }
+      const w = px * (1.1 - 0.16 * hv), h = px * (0.86 + 0.26 * hv);
+      ctx.drawImage(img, sx - w / 2, gy - lift - h, w, h);
     } else {
       const q = Math.max(1.3, px);
-      ctx.fillRect(sx, y - q, q, q);
+      ctx.fillRect(sx - q * 0.5, gy - q, q, q);
     }
   }
 }
@@ -889,8 +980,8 @@ function render() {
   drawBG();
   selGate = (mode === 'play' || mode === 'test') ? (G.gates.find(g => !g.used) || null) : null;
   curBox = selGate ? crowdBox() : null;
-  for (let i = G.gates.length - 1; i >= 0; i--) drawGate(G.gates[i]);
-  for (let i = G.traps.length - 1; i >= 0; i--) drawTrap(G.traps[i]);
+  const items = G.gates.concat(G.traps); items.sort((a, b) => b.z - a.z);      // 由遠到近，閘門和障礙才不會互相蓋錯
+  for (const it of items) { if (it.ops) drawGate(it); else drawObstacle(it); }
   if (G.level) drawBoss();
   drawCrowd();
   if (G.flash > 0) { ctx.globalAlpha = clamp(G.flash * 1.1, 0, 0.25); ctx.fillStyle = G.flashCol; ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 1; }
