@@ -108,7 +108,7 @@ button:focus-visible{outline:3px solid var(--steam);outline-offset:2px}
 
 <div id="stage">
   <canvas id="cv" role="img" aria-label="遊戲畫面"></canvas>
-  <div class="ver">v0.2.1</div>
+  <div class="ver">v0.2.2</div>
 
   <section id="menu" class="screen menu">
     <header class="brand">
@@ -189,7 +189,8 @@ const FAR = 36;               // 可見距離
 const PK = 0.33;              // 透視係數 p = 1/(1+PK*z)
 const LIM_X = 0.5;            // 手指可拖到的左右範圍
 const LANE_IN = 0.95;         // 隊伍中心可到的範圍（跑道半寬 = 1）
-const CROWD_HALF = 0.5;       // 隊伍最寬只排半條跑道（一個閘門的寬度），這樣才看得出選左還是選右
+const CROWD_MAX = 0.72;        // 人數太多時，隊伍可以往兩側滿出去的最大半寬；滿出的那部分躲不掉另一邊的閘門和辣椒鍋
+const CROWD_HALF = 0.5;       // 平常隊伍最寬只排半條跑道（一個閘門的寬度），這樣才看得出選左還是選右
 const S0 = 0.16;              // 一隻食物的基本寬度；數量不多時固定不縮小
 const ZMAX = 9;               // 隊伍往後最多排到多深
 const REDUCE = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -288,23 +289,32 @@ function foodBig(i) {
   return s;
 }
 
-// 隊伍陣型：六角形格子。人數少時以 S0 固定大小排成一團，
-// 排滿跑道寬度與深度後，才分段縮小格子，直到整條跑道都是食物。
-const F = { id: 0, k: -1, s: S0, total: 0, X: null, Z: null, hwP: null, zmP: null, dl: null, dlN: -1, dlId: -1 };
-const ZCEN = 1.2;
-function capAt(s) { return Math.max(1, Math.floor(2 * CROWD_HALF / s)) * Math.max(1, Math.floor(ZMAX / (s * 2.4))); }
-function levelFor(N) { let k = 0; while (k < 300 && capAt(S0 * Math.pow(0.93, k)) < N) k++; return k; }
-function buildFormation(k) {
-  const s = S0 * Math.pow(0.93, k), dz = s * 2.4;
-  const cols = Math.max(2, Math.floor(2 * CROWD_HALF / s)), rows = Math.max(1, Math.floor(ZMAX / dz));
+// 隊伍陣型：六角形格子。平常最寬只排半條跑道（看得出選哪邊）；人數多到排不下時，
+// 先固定大小往兩側滿出去（最寬 CROWD_MAX），再不夠才縮小。魔王戰（boss）改成整條跑道散開。
+const F = { id: 0, prof: '', ci: -1, s: S0, hwMax: CROWD_HALF, total: 0, X: null, Z: null, hwP: null, zmP: null, dl: null, dlN: -1, dlId: -1, prev: null };
+const ZCEN = 1.2, CANDS = {};
+function candList(prof) {
+  if (CANDS[prof]) return CANDS[prof];
+  const hws = prof === 'boss' ? [0.93] : [0.5, 0.55, 0.6, 0.65, 0.7, CROWD_MAX], L = [];
+  let lastCols = 0;
+  for (const hw of hws) { const cols = Math.max(2, Math.floor(2 * hw / S0)); if (cols !== lastCols) { L.push({ s: S0, hw }); lastCols = cols; } }
+  const hwEnd = hws[hws.length - 1];
+  for (let k = 1; k <= 300; k++) L.push({ s: S0 * Math.pow(0.93, k), hw: hwEnd });
+  for (const c of L) c.cap = Math.max(2, Math.floor(2 * c.hw / c.s)) * Math.max(1, Math.floor(ZMAX / (c.s * 2.4)));
+  return (CANDS[prof] = L);
+}
+function levelFor(N, prof) { const L = candList(prof); let i = 0; while (i < L.length - 1 && L[i].cap < N) i++; return i; }
+function buildFormation(prof, ci) {
+  const c = candList(prof)[ci], s = c.s, dz = s * 2.4;
+  const cols = Math.max(2, Math.floor(2 * c.hw / s)), rows = Math.max(1, Math.floor(ZMAX / dz));
   const total = rows * cols - Math.floor(rows / 2);
   const ux = new Float32Array(total), uz = new Float32Array(total), keys = new Float64Array(total);
   let i = 0;
   for (let r = 0; r < rows; r++) {
     const cc = (r & 1) ? cols - 1 : cols, off = (cc - 1) / 2;
-    for (let c = 0; c < cc; c++, i++) {
+    for (let q = 0; q < cc; q++, i++) {
       const h1 = (Math.imul(i + 1, 0x9e3779b1) >>> 0) / 4294967296, h2 = (Math.imul(i + 7, 0x85ebca6b) >>> 0) / 4294967296;
-      const x = (c - off) * s + (h1 - 0.5) * s * 0.3, z = r * dz + (h2 - 0.5) * dz * 0.3;
+      const x = (q - off) * s + (h1 - 0.5) * s * 0.3, z = r * dz + (h2 - 0.5) * dz * 0.3;
       ux[i] = x; uz[i] = z;
       const dzc = (z - ZCEN) * 0.25;
       keys[i] = Math.floor((x * x + dzc * dzc) * 65536) * 1048576 + i;
@@ -319,12 +329,17 @@ function buildFormation(k) {
     const a = Math.abs(X[j]) + s * 0.5; if (a > hw) hw = a; if (Z[j] > zm) zm = Z[j];
     hwP[j] = hw; zmP[j] = zm;
   }
-  F.id++; F.k = k; F.s = s; F.total = total; F.X = X; F.Z = Z; F.hwP = hwP; F.zmP = zmP; F.dl = null; F.dlN = -1;
+  F.id++; F.prof = prof; F.ci = ci; F.s = s; F.hwMax = c.hw; F.total = total; F.X = X; F.Z = Z; F.hwP = hwP; F.zmP = zmP; F.dl = null; F.dlN = -1;
 }
-function ensureFormation(N) {
-  const want = levelFor(N);
-  if (F.k !== want) buildFormation(want);
-  while (F.total < N && F.k < 300) buildFormation(F.k + 1);
+function ensureFormation(N, prof) {
+  prof = prof || 'run';
+  const want = levelFor(N, prof), L = candList(prof);
+  if (F.prof !== prof || F.ci !== want) {
+    if (prof === 'boss' && F.prof === 'run' && F.X) F.prev = { X: F.X, Z: F.Z, s: F.s, hw: Math.min(F.hwP[Math.min(N, F.total) - 1], F.hwMax + 0.05) };
+    else if (prof === 'run') F.prev = null;
+    buildFormation(prof, want);
+  }
+  while (F.total < N && F.ci < L.length - 1) buildFormation(prof, F.ci + 1);
 }
 // 由遠到近的繪製順序（只建一次，人數變多時才重建）
 function prepDraw(NM) {
@@ -338,8 +353,8 @@ function prepDraw(NM) {
   F.dl = dl; F.dlN = n; F.dlId = F.id;
 }
 function crowdBox() {
-  const N = Math.max(1, G.count | 0); ensureFormation(N);
-  const hw = Math.min(F.hwP[Math.min(N, F.total) - 1], CROWD_HALF + 0.05), lim = Math.max(0, LANE_IN - hw);
+  const N = Math.max(1, G.count | 0); ensureFormation(N, 'run');
+  const hw = Math.min(F.hwP[Math.min(N, F.total) - 1], F.hwMax + 0.05), lim = Math.max(0, LANE_IN - hw);
   return { hw, cx: clamp(G.leaderX, -lim, lim) };
 }
 
@@ -400,7 +415,7 @@ function genLevel(n, lim) {
     z += 12;
   }
   const bossZ = z + 12;
-  const frac = 0.5 + 0.3 * Math.min(1, (n - 1) / 12);
+  const frac = 0.45 + 0.25 * Math.min(1, (n - 1) / 12);
   const hp = Math.max(3, Math.round(opt * frac));
   return { n, gates, traps, bossZ, hp, opt, start, lim, food: foodIdxOf(n), bossFood: bossIdxOf(n) };
 }
@@ -410,7 +425,7 @@ let mode = 'menu';   // menu | play | boss | result | test | testdone
 const G = { D: 0, speed: 6, leaderX: 0, tx: 0, count: 36, t: 0, gates: [], traps: [], bossZ: 0, stopD: 0,
   level: null, boss: null, floaters: [], parts: [], six: null, shake: 0, flash: 0, flashCol: '#fff', limit: 2000, shownCount: -1, foodIdx: 0 };
 const keys = { l: false, r: false };
-let T = null, lastDt = 16, fpsEma = 60, fpsShowAt = 0, selGate = null;
+let T = null, lastDt = 16, fpsEma = 60, fpsShowAt = 0, selGate = null, curBox = null;
 
 function show(...ids) { for (const s of ['menu', 'hud', 'thud', 'result', 'tres']) $(s).hidden = !ids.includes(s); }
 function popCount(el) { el.classList.remove('pop'); void el.offsetWidth; el.classList.add('pop'); }
@@ -469,12 +484,19 @@ function finalizeStage() {
   $('tInfo').textContent = '上一階段 ' + fmt(G.count) + ' 隻 · ' + Math.round(fps) + ' FPS · ' + ms.toFixed(1) + ' ms';
   if (fps < 22 || G.count >= MAXN) endTest();
 }
+function applyPart(op, n, lim) {
+  if (n <= 0) return 0;
+  let r = n;
+  if (op.op === 'add') r = n + op.v; else if (op.op === 'mul') r = n * op.v; else if (op.op === 'sub') r = n - op.v; else r = Math.floor(n / op.v);
+  return clamp(Math.round(r), 0, lim);
+}
 function resolveGate(g) {
-  const side = G.leaderX < 0 ? 'L' : 'R'; const op = g[side];
+  const side = G.leaderX < 0 ? 'L' : 'R';
   g.used = true; g.picked = side;
   const p = 1 / (1 + PK * (g.z - G.D));
-  const gx = W / 2 + (side === 'L' ? -0.5 : 0.5) * laneHalf * p, gy = horizonY + (groundY - horizonY) * p - laneHalf * p * 0.7;
+  const gyy = horizonY + (groundY - horizonY) * p - laneHalf * p * 0.7;
   if (mode === 'test') {
+    const op = g[side];
     finalizeStage();
     if (T.done) return;
     G.count = applyOp(op, G.count, MAXN); T.stage++;
@@ -483,9 +505,17 @@ function resolveGate(g) {
     popCount($('tCount')); $('tCount').textContent = fmt(G.count);
     return;
   }
-  const before = G.count; G.count = applyOp(op, G.count, G.limit);
+  // 隊伍滿出半邊時，落在哪一邊的食物就吃哪一邊的閘門
+  const { cx, hw } = crowdBox();
+  const before = Math.max(1, G.count | 0);
+  const fL = clamp((hw - cx) / (2 * hw), 0, 1);
+  const nL = Math.round(before * fL), nR = before - nL;
+  const aL = applyPart(g.L, nL, G.limit), aR = applyPart(g.R, nR, G.limit);
+  G.count = clamp(aL + aR, 1, G.limit);
+  g.picked = nL >= nR ? 'L' : 'R';
+  if (nL > 0) floater(W / 2 - 0.5 * laneHalf * p, gyy, opLabel(g.L), opGood(g.L) ? COL.blue : COL.bad, nR > 0 ? 26 : 34);
+  if (nR > 0) floater(W / 2 + 0.5 * laneHalf * p, gyy, opLabel(g.R), opGood(g.R) ? COL.blue : COL.bad, nL > 0 ? 26 : 34);
   const good = G.count >= before;
-  floater(gx, gy, opLabel(op), good ? COL.blue : COL.bad, 34);
   if (good) sfx.good(); else sfx.bad();
   G.flash = 0.22; G.flashCol = good ? COL.blue : COL.bad;
   popCount($('hudCount'));
@@ -504,10 +534,10 @@ function resolveTrap(tr) {
 function startBoss() {
   const L = G.level;
   mode = 'boss';
-  G.boss = { hp0: L.hp, hp: L.hp, c0: G.count, t: 0, dur: clamp(1.6 + Math.log10(Math.max(10, G.count)) * 0.4, 1.8, 3.2), nextHit: 0, done: false };
+  G.boss = { hp0: L.hp, hp: L.hp, c0: G.count, t: 0, dur: clamp(1.6 + Math.log10(Math.max(10, G.count)) * 0.4, 1.8, 3.2), nextHit: 0, done: false, spreadT: 0 };
 }
 function updateBoss(dt) {
-  const B = G.boss; B.t += dt;
+  const B = G.boss; B.t += dt; B.spreadT = Math.min(1, B.spreadT + dt / 0.7);
   const f = clamp(B.t / B.dur, 0, 1), e = f * f * (3 - 2 * f);
   const dealt = e * Math.min(B.c0, B.hp0);
   G.count = Math.max(0, Math.round(B.c0 - dealt)); B.hp = Math.max(0, B.hp0 - dealt);
@@ -524,7 +554,7 @@ function finishLevel(win) {
   mode = 'result';
   if (win) {
     const ratio = B.c0 / Math.max(1, L.opt);
-    const st = ratio >= 0.75 ? 3 : ratio >= 0.5 ? 2 : 1;
+    const st = ratio >= 0.7 ? 3 : ratio >= 0.45 ? 2 : 1;
     save.stars[n] = Math.max(save.stars[n] || 0, st);
     save.level = Math.max(save.level, n + 1); save.sel = n + 1; persist();
     G.count = Math.max(1, B.c0 - Math.ceil(B.hp0));
@@ -729,7 +759,7 @@ function drawGate(g) {
     ctx.lineWidth = Math.max(2, fs * 0.16); ctx.strokeStyle = '#2b1d3a'; ctx.lineJoin = 'round';
     const lab = opLabel(op), tx = (x0 + x1) / 2, ty = y0 - hh * 0.5;
     ctx.strokeText(lab, tx, ty); ctx.fillStyle = COL.steam; ctx.fillText(lab, tx, ty);
-    if (!used && selGate === g && side === pickSide) {      // 目前手指指向的那一邊
+    if (!used && selGate === g && curBox && (side === 'L' ? curBox.cx - curBox.hw < 0 : curBox.cx + curBox.hw > 0)) {      // 目前手指指向的那一邊
       ctx.globalAlpha = 1; ctx.lineWidth = Math.max(2, hh * 0.035); ctx.strokeStyle = '#fff'; ctx.strokeRect(x0 + 1, y0 - hh + 1, x1 - x0 - 2, hh - 2);
     }
   }
@@ -785,32 +815,35 @@ function drawBoss() {
 
 function drawCrowd() {
   const N = G.count | 0; if (N <= 0) return;
+  const boss = !!G.boss && (mode === 'boss' || mode === 'result'), prof = boss ? 'boss' : 'run';
   const NM = (mode === 'boss' && G.boss) ? Math.max(N, G.boss.c0) : N;
-  ensureFormation(NM); prepDraw(NM);
-  const s = F.s, idxN = Math.min(N, F.total) - 1;
-  const hw = Math.min(F.hwP[idxN], CROWD_HALF + 0.05), zm = F.zmP[idxN];
-  const lim = Math.max(0, LANE_IN - hw), cxw = clamp(G.leaderX, -lim, lim);
+  ensureFormation(NM, prof); prepDraw(NM);
+  const sp0 = (mode === 'boss' && G.boss) ? clamp(G.boss.spreadT, 0, 1) : 1, sp = sp0 * sp0 * (3 - 2 * sp0);
+  const pv = (sp < 1 && F.prev) ? F.prev : null;      // 魔王戰一開始：由半寬散開成整條跑道
+  const idxN = Math.min(N, F.total) - 1;
+  let hw = Math.min(F.hwP[idxN], F.hwMax + 0.05), s = F.s;
+  if (pv) { hw = pv.hw + (hw - pv.hw) * sp; s = pv.s + (s - pv.s) * sp; }
+  const zm = F.zmP[idxN], lim = Math.max(0, LANE_IN - hw), cxw = clamp(G.leaderX, -lim, lim);
   const dyH = groundY - horizonY, px0 = s * laneHalf, food = FOODS[G.foodIdx];
   const pN = 1 / (1 + PK * ZC), pF = 1 / (1 + PK * (ZC + zm + s)), pM = (pN + pF) / 2;
   const yN = horizonY + dyH * pN, yF = horizonY + dyH * pF;
   ctx.fillStyle = 'rgba(0,0,0,.28)'; ctx.beginPath();
   ctx.ellipse(W / 2 + cxw * laneHalf * pM, (yN + yF) / 2, (hw + 0.06) * laneHalf * pM, (yN - yF) / 2 + 4, 0, 0, 7); ctx.fill();
   const dl = F.dl, X = F.X, Z = F.Z, nd = dl.length, cw = W / 2;
-  if (px0 * pN >= 6) {
-    const img = foodSprite(G.foodIdx), hop = N <= 600 && px0 * pN >= 8, t9 = G.t * 9;
-    for (let j = 0; j < nd; j++) {
-      const i = dl[j]; if (i >= N) continue;
-      const p = 1 / (1 + PK * (ZC + Z[i])), px = px0 * p * 1.14;
-      let y = horizonY + dyH * p;
+  const big = px0 * pN >= 6, img = big ? foodSprite(G.foodIdx) : null, hop = big && N <= 600, t9 = G.t * 9;
+  if (!big) ctx.fillStyle = food.col;
+  for (let j = 0; j < nd; j++) {
+    const i = dl[j]; if (i >= N) continue;
+    let x = X[i], z = Z[i];
+    if (pv) { x = pv.X[i] + (x - pv.X[i]) * sp; z = pv.Z[i] + (z - pv.Z[i]) * sp; }
+    const p = 1 / (1 + PK * (ZC + z)), px = px0 * p * 1.14, sx = cw + (cxw + x) * laneHalf * p - px * 0.5;
+    let y = horizonY + dyH * p;
+    if (big) {
       if (hop) y -= Math.abs(Math.sin(t9 + i * 0.9)) * 0.05 * laneHalf * p;
-      ctx.drawImage(img, cw + (cxw + X[i]) * laneHalf * p - px * 0.5, y - px, px, px);
-    }
-  } else {
-    ctx.fillStyle = food.col;
-    for (let j = 0; j < nd; j++) {
-      const i = dl[j]; if (i >= N) continue;
-      const p = 1 / (1 + PK * (ZC + Z[i])), px = Math.max(1.3, px0 * p * 1.14);
-      ctx.fillRect(cw + (cxw + X[i]) * laneHalf * p - px * 0.5, horizonY + dyH * p - px, px, px);
+      ctx.drawImage(img, sx, y - px, px, px);
+    } else {
+      const q = Math.max(1.3, px);
+      ctx.fillRect(sx, y - q, q, q);
     }
   }
 }
@@ -855,6 +888,7 @@ function render() {
   if (sh) { ctx.save(); const m = G.shake * 18; ctx.translate((Math.random() - 0.5) * m, (Math.random() - 0.5) * m); }
   drawBG();
   selGate = (mode === 'play' || mode === 'test') ? (G.gates.find(g => !g.used) || null) : null;
+  curBox = selGate ? crowdBox() : null;
   for (let i = G.gates.length - 1; i >= 0; i--) drawGate(G.gates[i]);
   for (let i = G.traps.length - 1; i >= 0; i--) drawTrap(G.traps[i]);
   if (G.level) drawBoss();
