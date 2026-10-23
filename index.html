@@ -108,7 +108,7 @@ button:focus-visible{outline:3px solid var(--steam);outline-offset:2px}
 
 <div id="stage">
   <canvas id="cv" role="img" aria-label="遊戲畫面"></canvas>
-  <div class="ver">v0.2.0</div>
+  <div class="ver">v0.2.1</div>
 
   <section id="menu" class="screen menu">
     <header class="brand">
@@ -187,9 +187,10 @@ const MAXN = 262144;          // 測試跑道上限 2^18
 const ZC = 1.0;               // 隊伍最前排離鏡頭的深度
 const FAR = 36;               // 可見距離
 const PK = 0.33;              // 透視係數 p = 1/(1+PK*z)
-const LIM_X = 0.8;            // 手指可拖到的左右範圍
-const LANE_IN = 0.95;         // 隊伍可佔用的跑道半寬（跑道半寬 = 1）
-const S0 = 0.19;              // 一隻食物的基本寬度；數量不多時固定不縮小
+const LIM_X = 0.5;            // 手指可拖到的左右範圍
+const LANE_IN = 0.95;         // 隊伍中心可到的範圍（跑道半寬 = 1）
+const CROWD_HALF = 0.5;       // 隊伍最寬只排半條跑道（一個閘門的寬度），這樣才看得出選左還是選右
+const S0 = 0.16;              // 一隻食物的基本寬度；數量不多時固定不縮小
 const ZMAX = 9;               // 隊伍往後最多排到多深
 const REDUCE = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
 const COL = { ink:'#1b1226', panel:'#2b1d3a', steam:'#fff3df', muted:'#bba9cc', lantern:'#ff5a3c', noodle:'#ffc95c', tea:'#6fdca4', blue:'#46a8ff', bad:'#ff4d6d' };
@@ -291,11 +292,11 @@ function foodBig(i) {
 // 排滿跑道寬度與深度後，才分段縮小格子，直到整條跑道都是食物。
 const F = { id: 0, k: -1, s: S0, total: 0, X: null, Z: null, hwP: null, zmP: null, dl: null, dlN: -1, dlId: -1 };
 const ZCEN = 1.2;
-function capAt(s) { return Math.max(1, Math.floor(2 * LANE_IN / s)) * Math.max(1, Math.floor(ZMAX / (s * 2.4))); }
+function capAt(s) { return Math.max(1, Math.floor(2 * CROWD_HALF / s)) * Math.max(1, Math.floor(ZMAX / (s * 2.4))); }
 function levelFor(N) { let k = 0; while (k < 300 && capAt(S0 * Math.pow(0.93, k)) < N) k++; return k; }
 function buildFormation(k) {
   const s = S0 * Math.pow(0.93, k), dz = s * 2.4;
-  const cols = Math.max(2, Math.floor(2 * LANE_IN / s)), rows = Math.max(1, Math.floor(ZMAX / dz));
+  const cols = Math.max(2, Math.floor(2 * CROWD_HALF / s)), rows = Math.max(1, Math.floor(ZMAX / dz));
   const total = rows * cols - Math.floor(rows / 2);
   const ux = new Float32Array(total), uz = new Float32Array(total), keys = new Float64Array(total);
   let i = 0;
@@ -338,7 +339,7 @@ function prepDraw(NM) {
 }
 function crowdBox() {
   const N = Math.max(1, G.count | 0); ensureFormation(N);
-  const hw = Math.min(F.hwP[Math.min(N, F.total) - 1], LANE_IN + 0.05), lim = Math.max(0, LANE_IN - hw);
+  const hw = Math.min(F.hwP[Math.min(N, F.total) - 1], CROWD_HALF + 0.05), lim = Math.max(0, LANE_IN - hw);
   return { hw, cx: clamp(G.leaderX, -lim, lim) };
 }
 
@@ -787,7 +788,7 @@ function drawCrowd() {
   const NM = (mode === 'boss' && G.boss) ? Math.max(N, G.boss.c0) : N;
   ensureFormation(NM); prepDraw(NM);
   const s = F.s, idxN = Math.min(N, F.total) - 1;
-  const hw = Math.min(F.hwP[idxN], LANE_IN + 0.05), zm = F.zmP[idxN];
+  const hw = Math.min(F.hwP[idxN], CROWD_HALF + 0.05), zm = F.zmP[idxN];
   const lim = Math.max(0, LANE_IN - hw), cxw = clamp(G.leaderX, -lim, lim);
   const dyH = groundY - horizonY, px0 = s * laneHalf, food = FOODS[G.foodIdx];
   const pN = 1 / (1 + PK * ZC), pF = 1 / (1 + PK * (ZC + zm + s)), pM = (pN + pF) / 2;
@@ -811,11 +812,6 @@ function drawCrowd() {
       const p = 1 / (1 + PK * (ZC + Z[i])), px = Math.max(1.3, px0 * p * 1.14);
       ctx.fillRect(cw + (cxw + X[i]) * laneHalf * p - px * 0.5, horizonY + dyH * p - px, px, px);
     }
-  }
-  if (hw > 0.55 && (mode === 'play' || mode === 'test')) {      // 隊伍佔滿跑道時，用光圈標出手指位置
-    const q = proj(G.leaderX, ZC - 0.5);
-    ctx.strokeStyle = 'rgba(255,201,92,.95)'; ctx.lineWidth = 3; ctx.beginPath();
-    ctx.ellipse(q[0], q[1], 0.13 * laneHalf * q[2], 0.05 * laneHalf * q[2] + 1, 0, 0, 7); ctx.stroke();
   }
 }
 function drawFloaters() {
